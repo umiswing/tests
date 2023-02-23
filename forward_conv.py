@@ -30,8 +30,8 @@ import paddle.incubate as pi
 import time
 import sys
 
-paddle.set_default_dtype("float32")
-torch.set_default_dtype(torch.float32)
+paddle.set_default_dtype("float16")
+torch.set_default_dtype(torch.float16)
 
 
 def generate_data(config):
@@ -229,7 +229,7 @@ class TestSparseConv(unittest.TestCase):
         paddle.seed(0)
         with _test_eager_guard():
 
-            i=4
+            i=3
             values, indices = generate_data(config[i])
 
             p_shape = [
@@ -242,7 +242,6 @@ class TestSparseConv(unittest.TestCase):
             p_input = sparse.sparse_coo_tensor(p_indices, p_values, p_shape, False)
             p_input = sparse.coalesce(p_input)
 
-            p_input = core.eager.sparse_coo_tensor(p_input.indices(), p_input.values(), p_shape, False)
             p_conv = sparse.nn.Conv3D(
                 in_channels=config[i]['in_channels'],
                 out_channels=config[i]['out_channels'],
@@ -278,40 +277,39 @@ class TestSparseConv(unittest.TestCase):
             s_input.features.requires_grad_()
             s_out = s_conv(s_input)
             torch.cuda.synchronize(device=device)
+
+            # convert spconv.SparseConvTensor to sparse.sparse_coo_tensor
+            s_to_pd_indices = paddle.to_tensor(s_out.indices.cpu().detach().numpy().transpose(1, 0).tolist(), dtype='int32')
+            s_to_pd_values = paddle.to_tensor(s_out.features.cpu().detach().numpy().tolist())
+            s_to_pd = sparse.sparse_coo_tensor(s_to_pd_indices, s_to_pd_values, [s_out.batch_size] + s_out.spatial_shape + [config[i]['out_channels']], False)
+            s_to_pd = sparse.coalesce(s_to_pd)
+            print(s_to_pd)
             # out indices
             assert np.array_equal(
-                s_out.indices.cpu().detach().numpy().transpose(1, 0), c_out.indices().numpy())
-
-            print(s_out.features)
-            print(c_out.values())
-            s_out_features_nd = s_out.features.cpu().detach().numpy().flatten()
-            c_out_features_nd = c_out.values().numpy().flatten()
-            print(s_out_features_nd)
-
-            print(c_out_features_nd)
+                s_to_pd.indices().numpy(), c_out.indices().numpy())
 
             # out values
-            assert np.allclose(s_out_features_nd,
-            c_out_features_nd, atol=config[i]['diff'], rtol=config[i]['diff'])
+            assert np.allclose(s_to_pd.values().numpy().flatten(),
+            c_out.values().numpy().flatten(), atol=config[i]['diff'], rtol=config[i]['diff'])
 
             paddle.device.cuda.synchronize()
-            for n in range(1):
+            for n in range(10):
                 c_out = p_conv(p_input)
             paddle.device.cuda.synchronize()
 
             t0 = time.perf_counter()
-            for n in range(5):
+            for n in range(100):
                 c_out = p_conv(p_input)
             paddle.device.cuda.synchronize()
             t1 = time.perf_counter()
 
             torch.cuda.synchronize(device=device)
-            for n in range(1):
+            for n in range(10):
                 s_out = s_conv(s_input)
             torch.cuda.synchronize(device=device)
 
             t4 = time.perf_counter()
-            for n in range(5):
+            for n in range(100):
                 s_out = s_conv(s_input)
             torch.cuda.synchronize(device=device)
             t5 = time.perf_counter()
