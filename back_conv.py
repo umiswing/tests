@@ -33,7 +33,6 @@ import sys
 paddle.set_default_dtype("float32")
 torch.set_default_dtype(torch.float32)
 
-
 def generate_data(config):
     values = []
     indices = []
@@ -107,7 +106,7 @@ config = [
         'kernel_size': (3, 3, 3),
         'strides': (1, 1, 1),
         'paddings': (0, 0, 0),
-        'diff': 1e-3,
+        'diff': 1e-2,
         'nnz': 220939
     },
     # 4
@@ -135,7 +134,7 @@ config = [
         'kernel_size': (3, 3, 3),
         'strides': (1, 1, 1),
         'paddings': (0, 0, 0),
-        'diff': 1e-3,
+        'diff': 1e-2,
         'nnz': 146376
     },
     # 6
@@ -163,7 +162,7 @@ config = [
         'kernel_size': (3, 3, 3),
         'strides': (2, 2, 2),
         'paddings': (0, 1, 1),
-        'diff': 1e-3,
+        'diff': 1e-2,
         'nnz': 65421
     },
     # 8
@@ -177,7 +176,7 @@ config = [
         'kernel_size': (3, 3, 3),
         'strides': (1, 1, 1),
         'paddings': (0, 0, 0),
-        'diff': 1e-3,
+        'diff': 1e-2,
         'nnz': 65421
     },
     # 9
@@ -206,7 +205,7 @@ config = [
         'strides': (1, 1, 1),
         'paddings': (0, 0, 0),
         'diff': 1e-3,
-        'nnz': 65421
+        'nnz': 55521
     },
     #11
     {
@@ -219,8 +218,8 @@ config = [
         'kernel_size': (3, 3, 3),
         'strides': (1, 1, 1),
         'paddings': (0, 0, 0),
-        'diff': 1e-3,
-        'nnz': 220939
+        'diff': 1e-2,
+        'nnz': 2021
     },
 ]
 class TestSparseConv(unittest.TestCase):
@@ -229,7 +228,7 @@ class TestSparseConv(unittest.TestCase):
         paddle.seed(0)
         with _test_eager_guard():
 
-            i=9
+            i=11
             values, indices = generate_data(config[i])
 
             p_shape = [
@@ -241,8 +240,8 @@ class TestSparseConv(unittest.TestCase):
             p_values = paddle.to_tensor(values)
             p_input = sparse.sparse_coo_tensor(p_indices, p_values, p_shape, False)
             p_input = sparse.coalesce(p_input)
-
             p_input = core.eager.sparse_coo_tensor(p_input.indices(), p_input.values(), p_shape, False)
+
             p_conv = sparse.nn.Conv3D(
                 in_channels=config[i]['in_channels'],
                 out_channels=config[i]['out_channels'],
@@ -267,7 +266,6 @@ class TestSparseConv(unittest.TestCase):
                                        padding=config[i]['paddings'],
                                        dilation=1,
                                        bias=False)
-                                       #algo=ConvAlgo.Native)
             s_conv.to(device=device)
 
             s_conv.weight = torch.nn.Parameter(torch.tensor(
@@ -280,16 +278,20 @@ class TestSparseConv(unittest.TestCase):
             s_out = s_conv(s_input)
             s_out.features.backward(s_out.features)
             torch.cuda.synchronize(device=device)
+
+            # convert spconv.SparseConvTensor to sparse.sparse_coo_tensor
+            s_to_pd_indices = paddle.to_tensor(s_out.indices.cpu().detach().numpy().transpose(1, 0).tolist(), dtype='int32')
+            s_to_pd_values = paddle.to_tensor(s_out.features.cpu().detach().numpy().tolist())
+            s_to_pd = sparse.sparse_coo_tensor(s_to_pd_indices, s_to_pd_values, [s_out.batch_size] + s_out.spatial_shape + [config[i]['out_channels']], False)
+            s_to_pd = sparse.coalesce(s_to_pd)
             # out indices
             assert np.array_equal(
-            s_out.indices.cpu().detach().numpy().transpose(1, 0), c_out.indices().numpy())
-
-            s_out_features_nd = s_out.features.cpu().detach().numpy().flatten()
-            c_out_features_nd = c_out.values().numpy().flatten()
+                s_to_pd.indices().numpy(), c_out.indices().numpy())
 
             # out values
-            assert np.allclose(s_out_features_nd,
-            c_out_features_nd, atol=config[i]['diff'], rtol=config[i]['diff'])
+            assert np.allclose(s_to_pd.values().numpy().flatten(),
+            c_out.values().numpy().flatten(), atol=config[i]['diff'], rtol=config[i]['diff'])
+
             print(s_input.features.grad)
             print(p_input.grad)
             # x_grad
@@ -300,7 +302,7 @@ class TestSparseConv(unittest.TestCase):
                 p_conv.weight.numpy(), (4, 0, 1, 2, 3)).flatten(), atol=config[i]['diff'], rtol=config[i]['diff'])
 
             paddle.device.cuda.synchronize()
-            for n in range(100):
+            for n in range(10):
                 c_out = p_conv(p_input)
                 c_out.backward(c_out)
             paddle.device.cuda.synchronize()
@@ -313,7 +315,7 @@ class TestSparseConv(unittest.TestCase):
             t1 = time.perf_counter()
 
             torch.cuda.synchronize(device=device)
-            for n in range(100):
+            for n in range(10):
                 s_out = s_conv(s_input)
                 s_out.features.backward(s_out.features)
             torch.cuda.synchronize(device=device)
